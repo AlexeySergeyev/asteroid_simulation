@@ -64,185 +64,129 @@ PLANETS = [
 # Parsers
 # ---------------------------------------------------------------------------
 
-def _load_astorb_angles(filepath: str):
+def load_asteroids(astorb_path: str, table2_path: str,
+                  max_count: int = MAX_ASTEROIDS):
     """
-    Read astorb.dat(.gz) and return a dict mapping asteroid number string
-    to (M0_deg, omega_deg, Omega_deg, name).
+    Load up to max_count asteroids from astorb.dat(.gz), upgrading a/e/i to
+    proper elements from table2.dat.gz where available.
+
+    Steps:
+      1. Read proper elements from table2.dat.gz into a lookup keyed by
+         unpacked asteroid number.
+      2. Stream astorb.dat up to max_count records.  For each asteroid use
+         proper a, e, i when the lookup contains a match; otherwise keep
+         the osculating a, e, i.  M0, omega, Omega always come from astorb.
+      3. Classify family from the final a/e:
+           NEO       : q = a(1-e) <= 1.3 AU  and  a <= 1.5 AU
+           Hilda     : 3.70 <= a <= 4.20 AU
+           Trojan    : 4.80 <= a <= 5.50 AU
+           Main belt : everything else
+
     astorb.dat fixed-width columns (0-indexed):
-      number : 0-5
-      name   : 7-25
-      M      : 115-125
-      omega  : 126-136
-      Omega  : 137-147
+      number [0:6]  name [7:25]  M0 [115:125]  omega [126:136]  Omega [137:147]
+      inc [148:158]  ecc [158:168]  a [168:181]
+
+    table2.dat whitespace-separated, 12 fields per line:
+      col 0: ap(AU)  col 2: ep  col 4: sinIp  col 11: unpacked number
     """
-    angles = {}
-    opener = gzip.open if filepath.endswith('.gz') else open
-    print(f"Reading osculating angles from {filepath}...")
+    # --- Step 1: proper elements lookup ---
+    proper = {}  # unpacked_number -> (a_p, e_p, i_p_rad)
+    opener2 = gzip.open if table2_path.endswith('.gz') else open
+    print(f"Reading proper elements from {table2_path}...")
     t0 = pytime.time()
-    with opener(filepath, 'rt', encoding='ascii', errors='replace') as f:
-        for line in f:
-            if len(line) < 147:
-                continue
-            num_str = line[0:6].strip()
-            if not num_str:
-                continue
-            try:
-                M_deg  = float(line[115:125].strip())
-                om_deg = float(line[126:136].strip())
-                Om_deg = float(line[137:147].strip())
-                name   = line[7:25].strip()
-                angles[num_str] = (M_deg, om_deg, Om_deg, name)
-            except ValueError:
-                continue
-    print(f"  {len(angles):,} records in {pytime.time()-t0:.1f}s")
-    return angles
-
-
-def load_table2_asteroids(table2_path: str, astorb_path: str,
-                          max_count: int = MAX_ASTEROIDS):
-    """
-    Load proper orbital elements from table2.dat.gz (Nesvorny+ 2024) and join
-    osculating M0, omega, Omega from astorb.dat by asteroid number.
-
-    table2.dat whitespace-separated fields (12 per line):
-      0: ap(AU)  1: e_ap  2: ep  3: e_ep  4: sinIp  5: e_sinIp
-      6: g  7: s  8: HMag  9: Nop  10: MPC(packed)  11: uMPC(unpacked)
-
-    Returns dict of NumPy arrays with angles in radians, M0 in degrees.
-    """
-    angles_map = _load_astorb_angles(astorb_path)
-
-    M0_list    = []
-    omega_list = []
-    Omega_list = []
-    inc_list   = []
-    ecc_list   = []
-    a_list     = []
-    names      = []
-
-    opener = gzip.open if table2_path.endswith('.gz') else open
-    print(f"Loading proper elements from {table2_path}...")
-    t0 = pytime.time()
-    count = 0
-    with opener(table2_path, 'rt', encoding='ascii', errors='replace') as f:
+    with opener2(table2_path, 'rt', encoding='ascii', errors='replace') as f:
         for line in f:
             parts = line.split()
             if len(parts) != 12:
                 continue
             try:
-                a    = float(parts[0])
-                ecc  = float(parts[2])
+                a_p  = float(parts[0])
+                e_p  = float(parts[2])
                 sinI = float(parts[4])
                 key  = parts[11].strip()
             except ValueError:
                 continue
-
-            if a <= 0 or a > 100 or ecc < 0 or ecc >= 1.0:
+            if a_p <= 0 or e_p < 0 or e_p >= 1.0 or abs(sinI) > 1.0:
                 continue
-            if abs(sinI) > 1.0:
-                continue
-            if key not in angles_map:
-                continue
+            proper[key] = (a_p, e_p, math.asin(min(max(sinI, -1.0), 1.0)))
+    print(f"  {len(proper):,} proper-element records in {pytime.time()-t0:.1f}s")
 
-            M0_deg, om_deg, Om_deg, name = angles_map[key]
-            inc = math.asin(min(max(sinI, -1.0), 1.0))
-
-            M0_list.append(M0_deg)
-            omega_list.append(om_deg * DEG2RAD)
-            Omega_list.append(Om_deg * DEG2RAD)
-            inc_list.append(inc)
-            ecc_list.append(ecc)
-            a_list.append(a)
-            names.append(name)
-
-            count += 1
-            if count >= max_count:
-                break
-
-    dt = pytime.time() - t0
-    print(f"Matched {len(a_list):,} asteroids in {dt:.1f}s")
-
-    return {
-        'M0':    np.array(M0_list,    dtype=np.float64),  # degrees (trigger time)
-        'omega': np.array(omega_list, dtype=np.float64),  # radians
-        'Omega': np.array(Omega_list, dtype=np.float64),  # radians
-        'inc':   np.array(inc_list,   dtype=np.float64),  # radians
-        'ecc':   np.array(ecc_list,   dtype=np.float64),
-        'a':     np.array(a_list,     dtype=np.float64),  # AU
-        'names': names,
-    }
-
-
-def load_families_from_astorb(filepath: str):
-    """
-    Read all osculating elements from astorb.dat(.gz) and return Hilda,
-    Jupiter Trojan, and Near-Earth Asteroid populations:
-      Hildas  (3:2 MMR):  3.70 ≤ a ≤ 4.20 AU
-      Trojans (L4 + L5):  4.80 ≤ a ≤ 5.50 AU
-      NEOs:               q = a(1-e) ≤ 1.3 AU  (Atiras/Atens/Apollos/Amors)
-
-    astorb.dat fixed-width columns (0-indexed):
-      number : [0:6]    name  : [7:25]
-      M      : [115:125]  omega : [126:136]  Omega : [137:147]
-      inc    : [148:158]  ecc   : [158:168]  a     : [168:181]
-    """
-    opener = gzip.open if filepath.endswith('.gz') else open
-    print(f"Loading Hilda/Trojan/NEO elements from {filepath}...")
+    # --- Step 2: stream astorb ---
+    opener1 = gzip.open if astorb_path.endswith('.gz') else open
+    print(f"Loading asteroids from {astorb_path}...")
     t0 = pytime.time()
 
-    M0_h, om_h, Om_h, inc_h, ecc_h, a_h, names_h = [], [], [], [], [], [], []
-    M0_t, om_t, Om_t, inc_t, ecc_t, a_t, names_t = [], [], [], [], [], [], []
-    M0_n, om_n, Om_n, inc_n, ecc_n, a_n, names_n = [], [], [], [], [], [], []
+    M0_list     = []
+    omega_list  = []
+    Omega_list  = []
+    inc_list    = []
+    ecc_list    = []
+    a_list      = []
+    family_list = []
+    names       = []
+    n_proper    = 0
 
-    with opener(filepath, 'rt', encoding='ascii', errors='replace') as f:
+    with opener1(astorb_path, 'rt', encoding='ascii', errors='replace') as f:
         for line in f:
             if len(line) < 181:
                 continue
+            num_str = line[0:6].strip()
+            if not num_str:
+                continue
             try:
-                a   = float(line[168:181])
-                ecc = float(line[158:168])
-                inc = float(line[148:158]) * DEG2RAD
                 M0  = float(line[115:125])
                 om  = float(line[126:136]) * DEG2RAD
                 Om  = float(line[137:147]) * DEG2RAD
+                i_o = float(line[148:158]) * DEG2RAD
+                e_o = float(line[158:168])
+                a_o = float(line[168:181])
             except ValueError:
                 continue
-
-            if ecc < 0 or ecc >= 1.0 or a <= 0:
+            if e_o < 0 or e_o >= 1.0 or a_o <= 0:
                 continue
 
-            name = line[7:25].strip()
-            q = a * (1.0 - ecc)
+            if num_str in proper:
+                a, e, inc = proper[num_str]
+                n_proper += 1
+            else:
+                a, e, inc = a_o, e_o, i_o
 
-            if q <= 1.3 and a <= 2.5:
-                M0_n.append(M0);  om_n.append(om);  Om_n.append(Om)
-                inc_n.append(inc); ecc_n.append(ecc); a_n.append(a)
-                names_n.append(name)
+            q = a * (1.0 - e)
+            if q <= 1.3 and a <= 1.5:
+                fam = FAMILY_NEO
             elif 3.70 <= a <= 4.20:
-                M0_h.append(M0);  om_h.append(om);  Om_h.append(Om)
-                inc_h.append(inc); ecc_h.append(ecc); a_h.append(a)
-                names_h.append(name)
+                fam = FAMILY_HILDA
             elif 4.80 <= a <= 5.50:
-                M0_t.append(M0);  om_t.append(om);  Om_t.append(Om)
-                inc_t.append(inc); ecc_t.append(ecc); a_t.append(a)
-                names_t.append(name)
+                fam = FAMILY_TROJAN
+            else:
+                fam = FAMILY_MAIN_BELT
 
-    n_h, n_t, n_n = len(a_h), len(a_t), len(a_n)
-    print(f"  {n_h:,} Hildas, {n_t:,} Trojans, {n_n:,} NEOs in {pytime.time()-t0:.1f}s")
+            M0_list.append(M0)
+            omega_list.append(om)
+            Omega_list.append(Om)
+            inc_list.append(inc)
+            ecc_list.append(e)
+            a_list.append(a)
+            family_list.append(fam)
+            names.append(line[7:25].strip())
 
-    fam_h = np.full(n_h, FAMILY_HILDA,  dtype=np.int8)
-    fam_t = np.full(n_t, FAMILY_TROJAN, dtype=np.int8)
-    fam_n = np.full(n_n, FAMILY_NEO,    dtype=np.int8)
+            if len(a_list) >= max_count:
+                break
+
+    N = len(a_list)
+    print(f"  {N:,} asteroids ({n_proper:,} with proper elements) in {pytime.time()-t0:.1f}s")
+
     return {
-        'M0':    np.concatenate([M0_h,  M0_t,  M0_n]).astype(np.float64),
-        'omega': np.concatenate([om_h,  om_t,  om_n]).astype(np.float64),
-        'Omega': np.concatenate([Om_h,  Om_t,  Om_n]).astype(np.float64),
-        'inc':   np.concatenate([inc_h, inc_t, inc_n]).astype(np.float64),
-        'ecc':   np.concatenate([ecc_h, ecc_t, ecc_n]).astype(np.float64),
-        'a':     np.concatenate([a_h,   a_t,   a_n]).astype(np.float64),
-        'family': np.concatenate([fam_h, fam_t, fam_n]),
-        'names': names_h + names_t + names_n,
+        'M0':    np.array(M0_list,    dtype=np.float64),
+        'omega': np.array(omega_list, dtype=np.float64),
+        'Omega': np.array(Omega_list, dtype=np.float64),
+        'inc':   np.array(inc_list,   dtype=np.float64),
+        'ecc':   np.array(ecc_list,   dtype=np.float64),
+        'a':     np.array(a_list,     dtype=np.float64),
+        'family': np.array(family_list, dtype=np.int8),
+        'names': names,
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -377,20 +321,13 @@ def main():
         astorb_path = sys.argv[2]
 
     # Load data
-    data = load_table2_asteroids(table2_path, astorb_path, MAX_ASTEROIDS)
-    if len(data['a']) == 0:
+    data = load_asteroids(astorb_path, table2_path, MAX_ASTEROIDS)
+    N = len(data['a'])
+    if N == 0:
         print("No asteroids loaded. Check data path.")
         sys.exit(1)
 
-    # Tag main-belt asteroids, then merge Hilda + Trojan families from astorb
-    N_main = len(data['a'])
-    data['family'] = np.zeros(N_main, dtype=np.int8)
-    families = load_families_from_astorb(astorb_path)
-    for key in ('M0', 'omega', 'Omega', 'inc', 'ecc', 'a', 'family'):
-        data[key] = np.concatenate([data[key], families[key]])
-    data['names'] = data['names'] + families['names']
-
-    N = len(data['a'])
+    N_main   = int(np.sum(data['family'] == FAMILY_MAIN_BELT))
     N_hilda  = int(np.sum(data['family'] == FAMILY_HILDA))
     N_trojan = int(np.sum(data['family'] == FAMILY_TROJAN))
     N_neo    = int(np.sum(data['family'] == FAMILY_NEO))
