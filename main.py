@@ -33,11 +33,12 @@ MAX_ASTEROIDS = 100_000
 
 # Camera defaults (AU range visible)
 DEFAULT_X_CENTER = 3.0              # AU — center of view
+DEFAULT_Y_CENTER = 1.0              # AU — vertical centre of view
 DEFAULT_X_SPAN = 8.0                # AU — total horizontal span
 # cam_y_span is derived each frame as cam_x_span * HEIGHT / WIDTH (uniform scale)
 
 # Time: simulation time in "seconds" where each second = 1° of M₀ activation
-TIME_SPEED_DEFAULT = 10.0           # degrees / real-second
+TIME_SPEED_DEFAULT = 30.0           # degrees / real-second
 TIME_SPEED_MIN = 0.5
 TIME_SPEED_MAX = 500.0
 
@@ -59,6 +60,129 @@ PLANETS = [
     ("Mars",     1.524, 0.0934,  1.850, 286.5,  49.6, (220, 100,  60)),
     ("Jupiter",  5.203, 0.0489,  1.304, 273.9, 100.5, (210, 170, 110)),
 ]
+
+# ---------------------------------------------------------------------------
+# Camera animation timeline
+# ---------------------------------------------------------------------------
+# Toggle at runtime with the K key.  Set CAMERA_ANIM_ENABLED = True to start
+# with animation active.
+#
+# Each entry in CAMERA_TIMELINE is a keyframe dict describing the ABSOLUTE
+# camera state at real-time 't' (seconds from animation start / last K press).
+# Any field that is omitted falls back to the value in _CAM_DEFAULTS.
+#
+# The 'ease' key controls the transition FROM this keyframe TO the next one:
+#   'linear'      — constant speed
+#   'smooth'      — smoothstep: slow-in / slow-out  (default)
+#   'ease_in'     — accelerates toward the next keyframe
+#   'ease_out'    — decelerates into the next keyframe
+#   'ease_in_out' — cubic: slow → fast → slow
+#
+# Animatable fields:
+#   x_center   (AU)   horizontal centre of view
+#   x_span     (AU)   visible width  /  zoom level
+#   azimuth    (deg)  rotation around ecliptic-north axis
+#   elevation  (deg)  camera tilt  (0 = edge-on, 90 = top-down, −90 = bottom-up)
+#   roll       (deg)  twist around the view direction
+#   y_center   (AU)   vertical centre of view
+#   time_speed (°/s)  asteroid-activation time speed
+# ---------------------------------------------------------------------------
+
+CAMERA_ANIM_ENABLED = False
+
+CAMERA_TIMELINE = [
+    # t=0  : start edge-on, belt centred
+    {
+        't': 0.0,
+        'x_center': DEFAULT_X_CENTER, 'x_span': 8.0,
+        'azimuth': 0.0, 'elevation': 0.0, 'roll': 0.0, 'y_center': DEFAULT_Y_CENTER,
+        'time_speed': 10.0,
+        'ease': 'smooth',
+    },
+    # t=8  : tilt up to top-down view
+    {
+        't': 8.0,
+        'x_center': DEFAULT_X_CENTER, 'x_span': 8.0,
+        'azimuth': 0.0, 'elevation': 90.0, 'roll': 0.0, 'y_center': DEFAULT_Y_CENTER,
+        'time_speed': 10.0,
+        'ease': 'smooth',
+    },
+    # t=16 : zoom out and swing the camera to an oblique angle
+    {
+        't': 16.0,
+        'x_center': 4.0, 'x_span': 14.0,
+        'azimuth': 30.0, 'elevation': 45.0, 'roll': 0.0, 'y_center': DEFAULT_Y_CENTER,
+        'time_speed': 20.0,
+        'ease': 'ease_out',
+    },
+    # t=28 : return to default edge-on view
+    {
+        't': 28.0,
+        'x_center': DEFAULT_X_CENTER, 'x_span': 8.0,
+        'azimuth': 0.0, 'elevation': 0.0, 'roll': 0.0, 'y_center': DEFAULT_Y_CENTER,
+        'time_speed': 10.0,
+        'ease': 'smooth',
+    },
+]
+
+_CAM_DEFAULTS = {
+    'x_center':   DEFAULT_X_CENTER,
+    'x_span':     8.0,
+    'azimuth':    0.0,
+    'elevation':  0.0,
+    'roll':       0.0,
+    'y_center':   DEFAULT_Y_CENTER,
+    'time_speed': TIME_SPEED_DEFAULT,
+}
+
+
+def _cam_interp(t: float) -> dict:
+    """
+    Interpolate camera parameters at real-time t (seconds since animation start).
+    Returns a dict with the same keys as _CAM_DEFAULTS (angles in degrees).
+    """
+    kf = CAMERA_TIMELINE
+    if not kf:
+        return dict(_CAM_DEFAULTS)
+
+    def _kf_vals(k):
+        return {field: k.get(field, _CAM_DEFAULTS[field]) for field in _CAM_DEFAULTS}
+
+    if t <= kf[0]['t']:
+        return _kf_vals(kf[0])
+    if t >= kf[-1]['t']:
+        return _kf_vals(kf[-1])
+
+    # Locate surrounding keyframes
+    k0, k1 = kf[-2], kf[-1]
+    for i in range(len(kf) - 1):
+        if kf[i]['t'] <= t < kf[i + 1]['t']:
+            k0, k1 = kf[i], kf[i + 1]
+            break
+
+    dt_kf = k1['t'] - k0['t']
+    alpha = (t - k0['t']) / dt_kf if dt_kf > 0 else 1.0
+
+    ease = k0.get('ease', 'smooth')
+    if ease == 'smooth':
+        alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+    elif ease == 'ease_in':
+        alpha = alpha * alpha
+    elif ease == 'ease_out':
+        alpha = 1.0 - (1.0 - alpha) ** 2
+    elif ease == 'ease_in_out':
+        if alpha < 0.5:
+            alpha = 4.0 * alpha ** 3
+        else:
+            alpha = 1.0 - (-2.0 * alpha + 2.0) ** 3 / 2.0
+    # 'linear': alpha unchanged
+
+    return {
+        field: k0.get(field, _CAM_DEFAULTS[field]) * (1.0 - alpha)
+               + k1.get(field, _CAM_DEFAULTS[field]) * alpha
+        for field in _CAM_DEFAULTS
+    }
+
 
 # ---------------------------------------------------------------------------
 # Parsers
@@ -341,9 +465,20 @@ def main():
     # At 0.5 yr/s, an inner-belt asteroid (P ≈ 4 yr) completes one orbit in ~8s.
     ORBITAL_SPEED = 0.5  # years per real-second
 
-    # Per-asteroid accumulated orbital phase (radians), independent of sim_time
-    M0_rad = data['M0'] * DEG2RAD           # initial M₀ in radians
-    M_phase = np.zeros(N, dtype=np.float64) # accumulated orbital advance
+    # Per-asteroid accumulated orbital phase (radians).
+    # Initialised to the y=0 crossing so every asteroid starts in the
+    # screen plane (no depth offset) when it activates.
+    # y=0 when: sin(Ω)cos(ω+ν) + cos(Ω)cos(i)sin(ω+ν) = 0
+    # => ω+ν = arctan2(-sin(Ω), cos(Ω)·cos(i))
+    u_y0 = np.arctan2(-np.sin(data['Omega']),
+                       np.cos(data['Omega']) * np.cos(data['inc']))
+    nu_y0 = (u_y0 - data['omega']) % TWO_PI
+    # True anomaly → eccentric anomaly → mean anomaly
+    sqrt_fac_node = np.sqrt((1.0 - data['ecc']) / (1.0 + data['ecc']))
+    E_node = 2.0 * np.arctan2(sqrt_fac_node * np.sin(nu_y0 / 2.0),
+                               np.cos(nu_y0 / 2.0))
+    M_node = (E_node - data['ecc'] * np.sin(E_node)) % TWO_PI
+    M_phase = M_node.copy()
 
     # Pre-compute planet 3D orbit points (fixed; camera transform applied per frame)
     planet_orbits = []
@@ -361,13 +496,20 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("monospace", 16, bold=True)
 
+    # Motion trail: persistent float buffer faded each frame, blitted additively
+    trail_pixels = np.zeros((WIDTH, HEIGHT, 3), dtype=np.float32)
+    trail_surf = pygame.Surface((WIDTH, HEIGHT))
+    trail_surf.fill((0, 0, 0))
+
     # Camera state
     cam_x_center = DEFAULT_X_CENTER
     cam_x_span = DEFAULT_X_SPAN
     cam_azimuth = 0.0                       # rotation around vertical (z) axis, radians
     cam_elevation = 0.0                     # tilt up/down (rotation around camera x-axis), radians
     cam_roll = 0.0                          # roll (rotation around camera depth axis), radians
-    cam_y_offset = 0.0                      # vertical pan offset (AU)
+    cam_y_center = DEFAULT_Y_CENTER         # vertical centre of view (AU)
+    cam_anim_enabled = CAMERA_ANIM_ENABLED  # K key toggles
+    cam_anim_time = 0.0                     # real seconds since animation start / last K press
 
     # Time state
     sim_time = 0.0              # simulation time in "degrees" (activation clock only)
@@ -376,6 +518,7 @@ def main():
     reverse = False                         # F key toggles direction
     show_hud = True                         # H key toggles HUD visibility
     show_orbits = True                      # O key toggles planet orbit lines
+    show_ai_plane = True                    # I key toggles: a/i plane vs real positions
 
     running = True
     while running:
@@ -394,14 +537,22 @@ def main():
                     paused = not paused
                 elif event.key == pygame.K_r:
                     sim_time = 0.0
-                    M_phase[:] = 0.0
+                    M_phase[:] = M_node
                     reverse = False
+                    cam_anim_time = 0.0
+                    trail_pixels[:] = 0.0
+                    trail_surf.fill((0, 0, 0))
                 elif event.key == pygame.K_f:
                     reverse = not reverse
                 elif event.key == pygame.K_h:
                     show_hud = not show_hud
                 elif event.key == pygame.K_o:
                     show_orbits = not show_orbits
+                elif event.key == pygame.K_i:
+                    show_ai_plane = not show_ai_plane
+                elif event.key == pygame.K_k:
+                    cam_anim_enabled = not cam_anim_enabled
+                    cam_anim_time = 0.0   # restart timeline from first keyframe
             elif event.type == pygame.MOUSEWHEEL:
                 zoom_factor = 0.9 if event.y > 0 else 1.1
                 cam_x_span *= zoom_factor
@@ -412,27 +563,28 @@ def main():
             time_speed = min(time_speed * 1.02, TIME_SPEED_MAX)
         if keys[pygame.K_MINUS]:
             time_speed = max(time_speed * 0.98, TIME_SPEED_MIN)
-        if keys[pygame.K_LEFT]:
-            cam_x_center -= 0.01 * cam_x_span
-        if keys[pygame.K_RIGHT]:
-            cam_x_center += 0.01 * cam_x_span
-        if keys[pygame.K_UP]:
-            cam_y_offset += 0.01 * cam_y_span   # pan up
-        if keys[pygame.K_DOWN]:
-            cam_y_offset -= 0.01 * cam_y_span   # pan down
-        # Camera rotation
-        if keys[pygame.K_a]:
-            cam_azimuth -= 0.01  # rotate left
-        if keys[pygame.K_d]:
-            cam_azimuth += 0.01  # rotate right
-        if keys[pygame.K_w]:
-            cam_elevation = min(cam_elevation + 0.01, math.pi / 2)  # tilt up
-        if keys[pygame.K_s]:
-            cam_elevation = max(cam_elevation - 0.01, -math.pi / 2)  # tilt down
-        if keys[pygame.K_z]:
-            cam_roll -= 0.01  # roll left
-        if keys[pygame.K_x]:
-            cam_roll += 0.01  # roll right
+        if not cam_anim_enabled:
+            if keys[pygame.K_LEFT]:
+                cam_x_center -= 0.01 * cam_x_span
+            if keys[pygame.K_RIGHT]:
+                cam_x_center += 0.01 * cam_x_span
+            if keys[pygame.K_UP]:
+                cam_y_center += 0.01 * cam_y_span   # pan up
+            if keys[pygame.K_DOWN]:
+                cam_y_center -= 0.01 * cam_y_span   # pan down
+            # Camera rotation
+            if keys[pygame.K_a]:
+                cam_azimuth -= 0.01  # rotate left
+            if keys[pygame.K_d]:
+                cam_azimuth += 0.01  # rotate right
+            if keys[pygame.K_w]:
+                cam_elevation = min(cam_elevation + 0.01, math.pi / 2)  # tilt up
+            if keys[pygame.K_s]:
+                cam_elevation = max(cam_elevation - 0.01, -math.pi / 2)  # tilt down
+            if keys[pygame.K_z]:
+                cam_roll -= 0.01  # roll left
+            if keys[pygame.K_x]:
+                cam_roll += 0.01  # roll right
 
         # --- Update ---
         if not paused:
@@ -448,9 +600,10 @@ def main():
             if reverse:
                 # Orbits run backward for still-moving asteroids
                 M_phase -= np.where(moving_mask, dM, 0.0)
-                M_phase = np.maximum(M_phase, 0.0)
+                # Don't wind back past the starting ascending-node angle
+                M_phase = np.maximum(M_phase, M_node)
                 # Reset phase for asteroids that just stopped
-                M_phase = np.where(moving_mask, M_phase, 0.0)
+                M_phase = np.where(moving_mask, M_phase, M_node)
             else:
                 # Advance orbital phase for moving asteroids
                 M_phase += np.where(moving_mask, dM, 0.0)
@@ -459,20 +612,35 @@ def main():
 
         n_moving = int(np.sum(moving_mask))
 
+        # --- Camera animation ---
+        cam_anim_time += dt_real
+        if cam_anim_enabled:
+            _cs = _cam_interp(cam_anim_time)
+            cam_x_center  = _cs['x_center']
+            cam_x_span    = _cs['x_span']
+            cam_azimuth   = math.radians(_cs['azimuth'])
+            cam_elevation = math.radians(_cs['elevation'])
+            cam_roll      = math.radians(_cs['roll'])
+            cam_y_center  = _cs['y_center']
+            time_speed    = max(TIME_SPEED_MIN, min(_cs['time_speed'], TIME_SPEED_MAX))
+            cam_y_span    = cam_x_span * HEIGHT / WIDTH   # recompute after override
+
         # --- Compute positions ---
-        # Moving asteroids: real 3D orbital positions
-        M_current = (M0_rad + M_phase) % TWO_PI
+        # Moving asteroids: real 3D orbital positions starting from y=0.
+        # Waiting asteroids: a/i plane — x=a, y=0, z=inclination (scaled).
+        M_current = M_phase % TWO_PI
         x, y, z = compute_positions(data['a'], data['ecc'], data['inc'],
                                     data['omega'], data['Omega'], M_current)
 
-        # Waiting asteroids: flat (a, i) plane display.
-        # x = a (semi-major axis), y = 0, z = inclination (in degrees, scaled to AU)
-        inc_deg = data['inc'] / DEG2RAD     # inclination in degrees
-        i_scale = cam_y_span / 60.0         # scale: 60° fills the vertical span
+        # Waiting asteroids: a/i distribution display (I=toggle) or real frozen positions.
+        # z = a·sin(i) is the physical max orbital height in AU — same units as the
+        # real orbit view, so the scale matches when toggling with I.
         waiting_mask = ~moving_mask
-        x = np.where(waiting_mask, data['a'], x)
-        y = np.where(waiting_mask, 0.0, y)
-        z = np.where(waiting_mask, inc_deg * i_scale, z)
+        if show_ai_plane:
+            x = np.where(waiting_mask, data['a'], x)
+            y = np.where(waiting_mask, 0.0, y)
+            z = np.where(waiting_mask, data['a'] * np.sin(data['inc']), z)
+        # else: keep real orbital positions frozen at M_node (y=0 crossing)
 
         # --- Camera rotation ---
         # 1. Azimuth: rotate around vertical (z) axis
@@ -497,7 +665,7 @@ def main():
 
         # --- Project to screen ---
         scr_x = (x_cam - (cam_x_center - cam_x_span / 2)) / cam_x_span * WIDTH
-        scr_y = HEIGHT / 2 - (z_cam - cam_y_offset) / cam_y_span * HEIGHT
+        scr_y = HEIGHT / 2 - (z_cam - cam_y_center) / cam_y_span * HEIGHT
 
         # Filter to visible
         visible = ((scr_x >= 0) & (scr_x < WIDTH) &
@@ -517,12 +685,40 @@ def main():
             c = int(4 + 8 * (1 - abs(t - 0.5) * 2))
             pygame.draw.line(screen, (c, c, c + 4), (0, row), (WIDTH, row))
 
+        # Motion trail: decay, update with current moving-asteroid positions, blit
+        trail_pixels *= 0.66  # decay existing trail
+        if n_visible > 0:
+            ix_t = np.clip(scr_x_vis, 0, WIDTH - 1)
+            iy_t = np.clip(scr_y_vis, 0, HEIGHT - 1)
+            moving_vis = moving_mask[visible]
+            if moving_vis.any():
+                ix_mov = ix_t[moving_vis]
+                iy_mov = iy_t[moving_vis]
+                y_cam_mov = y_cam_vis[moving_vis]
+                fam_mov = family_vis[moving_vis]
+                for fam_id, color_fn in (
+                    (FAMILY_MAIN_BELT, depth_color),
+                    (FAMILY_HILDA,     depth_color_hilda),
+                    (FAMILY_TROJAN,    depth_color_trojan),
+                    (FAMILY_NEO,       depth_color_neo),
+                ):
+                    fm = fam_mov == fam_id
+                    if fm.any():
+                        rc, gc, bc = color_fn(y_cam_mov[fm])
+                        trail_pixels[ix_mov[fm], iy_mov[fm], 0] = rc
+                        trail_pixels[ix_mov[fm], iy_mov[fm], 1] = gc
+                        trail_pixels[ix_mov[fm], iy_mov[fm], 2] = bc
+        trail_arr = pygame.surfarray.pixels3d(trail_surf)
+        np.copyto(trail_arr, trail_pixels.clip(0, 255).astype(np.uint8))
+        del trail_arr
+        screen.blit(trail_surf, (0, 0), special_flags=pygame.BLEND_ADD)
+
         # Draw Sun (apply same camera transform as asteroids)
         # Sun is at origin (0, 0, 0) — after camera rotation it stays at origin
         sun_x_cam = 0.0
         sun_z_cam = 0.0
         sun_sx = int((sun_x_cam - (cam_x_center - cam_x_span / 2)) / cam_x_span * WIDTH)
-        sun_sy = int(HEIGHT / 2 - (sun_z_cam - cam_y_offset) / cam_y_span * HEIGHT)
+        sun_sy = int(HEIGHT / 2 - (sun_z_cam - cam_y_center) / cam_y_span * HEIGHT)
         if -20 < sun_sx < WIDTH + 20:
             pygame.draw.circle(screen, SUN_COLOR, (sun_sx, sun_sy), 8)
             # Glow
@@ -543,7 +739,7 @@ def main():
                 px_cam   = px1 * cos_rl - pz2 * sin_rl
                 pz_cam   = px1 * sin_rl + pz2 * cos_rl
                 pscr_x = (px_cam - (cam_x_center - cam_x_span / 2)) / cam_x_span * WIDTH
-                pscr_y = HEIGHT / 2 - (pz_cam - cam_y_offset) / cam_y_span * HEIGHT
+                pscr_y = HEIGHT / 2 - (pz_cam - cam_y_center) / cam_y_span * HEIGHT
                 pts = [(int(pscr_x[i]), int(pscr_y[i])) for i in range(len(pscr_x))]
                 pygame.draw.lines(screen, pl_color, True, pts, 1)
                 # Label at rightmost on-screen point
@@ -590,8 +786,15 @@ def main():
                 f"Zoom: {cam_x_span:.2f} AU x {cam_y_span:.2f} AU",
                 f"Az: {az_deg:.1f}\u00b0  El: {el_deg:.1f}\u00b0  Ecl: {rl_deg:.1f}\u00b0",
             ]
+            if cam_anim_enabled and CAMERA_TIMELINE:
+                total_t = CAMERA_TIMELINE[-1]['t']
+                anim_pct = min(cam_anim_time / total_t * 100, 100) if total_t > 0 else 100
+                hud_lines.append(f"CamAnim: {cam_anim_time:.1f}s / {total_t:.0f}s  ({anim_pct:.0f}%)  K=off")
+            else:
+                hud_lines.append("CamAnim: OFF  (K=on to start)")
             if paused:
                 hud_lines.append("** PAUSED **")
+            hud_lines.append(f"Waiting: {'a/i plane' if show_ai_plane else 'real orbit'}  (I=toggle)")
 
             y_pos = 10
             for line in hud_lines:
@@ -613,7 +816,7 @@ def main():
                 ly += 20
 
         # Controls help (bottom)
-        controls = "SPACE=pause  F=reverse  +/-=speed  arrows=pan  A/D=azimuth  W/S=elevation  Z/X=ecliptic  scroll=zoom  H=HUD  O=orbits  R=reset  Q=quit"
+        controls = "SPACE=pause  F=reverse  +/-=speed  arrows=pan  A/D=azimuth  W/S=elevation  Z/X=ecliptic  scroll=zoom  H=HUD  O=orbits  I=a/i  K=anim  R=reset  Q=quit"
         ctrl_surf = font.render(controls, True, (100, 100, 120))
         screen.blit(ctrl_surf, (10, HEIGHT - 25))
 
