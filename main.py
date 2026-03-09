@@ -514,7 +514,7 @@ def main():
     # Time state
     sim_time = 0.0              # simulation time in "degrees" (activation clock only)
     time_speed = TIME_SPEED_DEFAULT
-    paused = False
+    paused = True                         # Space key toggles pause
     reverse = False                         # F key toggles direction
     show_hud = True                         # H key toggles HUD visibility
     show_orbits = True                      # O key toggles planet orbit lines
