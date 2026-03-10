@@ -29,7 +29,7 @@ WIDTH, HEIGHT = 1280, 800
 FPS_CAP = 60
 BG_COLOR = (4, 4, 12)
 
-MAX_ASTEROIDS = 100_000
+MAX_ASTEROIDS = 200_000
 
 # Camera defaults (AU range visible)
 DEFAULT_X_CENTER = 3.0              # AU — center of view
@@ -41,7 +41,6 @@ DEFAULT_X_SPAN = 8.0                # AU — total horizontal span
 TIME_SPEED_DEFAULT = 30.0           # degrees / real-second
 TIME_SPEED_MIN = 0.5
 TIME_SPEED_MAX = 500.0
-
 # Colors
 SUN_COLOR = (255, 210, 80)
 HUD_COLOR = (180, 200, 220)
@@ -466,19 +465,10 @@ def main():
     ORBITAL_SPEED = 0.5  # years per real-second
 
     # Per-asteroid accumulated orbital phase (radians).
-    # Initialised to the y=0 crossing so every asteroid starts in the
-    # screen plane (no depth offset) when it activates.
-    # y=0 when: sin(Ω)cos(ω+ν) + cos(Ω)cos(i)sin(ω+ν) = 0
-    # => ω+ν = arctan2(-sin(Ω), cos(Ω)·cos(i))
-    u_y0 = np.arctan2(-np.sin(data['Omega']),
-                       np.cos(data['Omega']) * np.cos(data['inc']))
-    nu_y0 = (u_y0 - data['omega']) % TWO_PI
-    # True anomaly → eccentric anomaly → mean anomaly
-    sqrt_fac_node = np.sqrt((1.0 - data['ecc']) / (1.0 + data['ecc']))
-    E_node = 2.0 * np.arctan2(sqrt_fac_node * np.sin(nu_y0 / 2.0),
-                               np.cos(nu_y0 / 2.0))
-    M_node = (E_node - data['ecc'] * np.sin(E_node)) % TWO_PI
-    M_phase = M_node.copy()
+    # Keep the catalogue mean anomaly so resonant populations, especially the
+    # Trojan L4/L5 clouds, retain their original angular separation.
+    M_initial = data['M0'] * DEG2RAD
+    M_phase = M_initial.copy()
 
     # Pre-compute planet 3D orbit points (fixed; camera transform applied per frame)
     planet_orbits = []
@@ -537,7 +527,7 @@ def main():
                     paused = not paused
                 elif event.key == pygame.K_r:
                     sim_time = 0.0
-                    M_phase[:] = M_node
+                    M_phase[:] = M_initial
                     reverse = False
                     cam_anim_time = 0.0
                     trail_pixels[:] = 0.0
@@ -600,10 +590,10 @@ def main():
             if reverse:
                 # Orbits run backward for still-moving asteroids
                 M_phase -= np.where(moving_mask, dM, 0.0)
-                # Don't wind back past the starting ascending-node angle
-                M_phase = np.maximum(M_phase, M_node)
+                # Don't wind back past each asteroid's catalogue phase.
+                M_phase = np.maximum(M_phase, M_initial)
                 # Reset phase for asteroids that just stopped
-                M_phase = np.where(moving_mask, M_phase, M_node)
+                M_phase = np.where(moving_mask, M_phase, M_initial)
             else:
                 # Advance orbital phase for moving asteroids
                 M_phase += np.where(moving_mask, dM, 0.0)
@@ -626,7 +616,7 @@ def main():
             cam_y_span    = cam_x_span * HEIGHT / WIDTH   # recompute after override
 
         # --- Compute positions ---
-        # Moving asteroids: real 3D orbital positions starting from y=0.
+        # Moving asteroids: real 3D orbital positions from their catalogue phase.
         # Waiting asteroids: a/i plane — x=a, y=0, z=inclination (scaled).
         M_current = M_phase % TWO_PI
         x, y, z = compute_positions(data['a'], data['ecc'], data['inc'],
@@ -640,7 +630,7 @@ def main():
             x = np.where(waiting_mask, data['a'], x)
             y = np.where(waiting_mask, 0.0, y)
             z = np.where(waiting_mask, data['a'] * np.sin(data['inc']), z)
-        # else: keep real orbital positions frozen at M_node (y=0 crossing)
+        # else: keep real orbital positions frozen at the catalogue phase
 
         # --- Camera rotation ---
         # 1. Azimuth: rotate around vertical (z) axis

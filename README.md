@@ -89,6 +89,6 @@ python3 main.py [table2.dat.gz] [astorb.dat.gz]
 
 1. **Orbit solving** — Kepler's equation is solved with Newton-Raphson (6 iterations) for all asteroids in a single vectorised NumPy pass.
 2. **Activation** — each asteroid has a catalogue mean anomaly M₀ ∈ [0°, 360°). The simulation clock advances in degrees/second; an asteroid starts orbiting when `sim_time ≥ M₀`.
-3. **Starting position** — every asteroid begins its orbit at the y = 0 ecliptic crossing (the point where it passes through the viewer's screen plane) to minimise the visual jump from the waiting position.
+3. **Starting position** — every asteroid keeps its catalogue mean anomaly when it activates, so resonant structures such as the Jupiter Trojan L4/L5 swarms remain separated correctly.
 4. **Waiting display** — unactivated asteroids are shown at (a, a·sin i) in AU, forming the classical a/i distribution plot that reveals the Kirkwood gaps and resonance families.
 5. **Rendering** — asteroid positions are written directly into a `surfarray` pixel buffer for maximum throughput at 60 FPS with 100 k bodies.
