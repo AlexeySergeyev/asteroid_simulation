@@ -29,7 +29,7 @@ WIDTH, HEIGHT = 1280, 800
 FPS_CAP = 60
 BG_COLOR = (4, 4, 12)
 
-MAX_ASTEROIDS = 200_000
+MAX_ASTEROIDS = 100_000
 
 # Camera defaults (AU range visible)
 DEFAULT_X_CENTER = 3.0              # AU — center of view
@@ -41,6 +41,7 @@ DEFAULT_X_SPAN = 8.0                # AU — total horizontal span
 TIME_SPEED_DEFAULT = 30.0           # degrees / real-second
 TIME_SPEED_MIN = 0.5
 TIME_SPEED_MAX = 500.0
+TRANSITION_DEGREES = 5.0            # sim-time degrees to blend from a/i plane to orbit
 # Colors
 SUN_COLOR = (255, 210, 80)
 HUD_COLOR = (180, 200, 220)
@@ -381,6 +382,55 @@ def orbit_points_3d(a, ecc, inc, omega, Omega, n_pts=ORBIT_SEGMENTS):
     return x, y, z
 
 
+def compute_y0_mean_anomaly(a, ecc, inc, omega, Omega):
+    """
+    Find the mean anomaly M where each orbit crosses y_heliocentric = 0,
+    choosing the crossing closest to the a/i plane position (a, 0, a·sin(i)).
+    """
+    cos_om = np.cos(omega)
+    sin_om = np.sin(omega)
+    cos_Om = np.cos(Omega)
+    sin_Om = np.sin(Omega)
+    cos_i = np.cos(inc)
+    sin_i = np.sin(inc)
+
+    # y = A·r·cos(ν) + B·r·sin(ν) = 0  →  two solutions
+    A = sin_Om * cos_om + cos_Om * sin_om * cos_i
+    B = -sin_Om * sin_om + cos_Om * cos_om * cos_i
+
+    nu1 = np.arctan2(-A, B)
+    nu2 = nu1 + np.pi
+
+    p = a * (1.0 - ecc * ecc)  # semi-latus rectum
+
+    # Positions for both crossings
+    def _pos(nu):
+        r = p / (1.0 + ecc * np.cos(nu))
+        xo = r * np.cos(nu)
+        yo = r * np.sin(nu)
+        x = (cos_Om * cos_om - sin_Om * sin_om * cos_i) * xo + \
+            (-cos_Om * sin_om - sin_Om * cos_om * cos_i) * yo
+        z = (sin_om * sin_i) * xo + (cos_om * sin_i) * yo
+        return x, z
+
+    x1, z1 = _pos(nu1)
+    x2, z2 = _pos(nu2)
+
+    # Target: a/i plane position
+    x_t = a
+    z_t = a * np.sin(inc)
+    d1 = (x1 - x_t) ** 2 + (z1 - z_t) ** 2
+    d2 = (x2 - x_t) ** 2 + (z2 - z_t) ** 2
+    nu = np.where(d1 <= d2, nu1, nu2)
+
+    # True anomaly → eccentric anomaly → mean anomaly
+    half_nu = nu / 2.0
+    E = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * np.sin(half_nu),
+                         np.sqrt(1.0 + ecc) * np.cos(half_nu))
+    M = (E - ecc * np.sin(E)) % TWO_PI
+    return M
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
@@ -464,10 +514,11 @@ def main():
     # At 0.5 yr/s, an inner-belt asteroid (P ≈ 4 yr) completes one orbit in ~8s.
     ORBITAL_SPEED = 0.5  # years per real-second
 
-    # Per-asteroid accumulated orbital phase (radians).
-    # Keep the catalogue mean anomaly so resonant populations, especially the
-    # Trojan L4/L5 clouds, retain their original angular separation.
-    M_initial = data['M0'] * DEG2RAD
+    # Per-asteroid starting orbital phase: the y=0 crossing closest to the
+    # a/i plane position so asteroids depart smoothly from the waiting plane.
+    M_initial = compute_y0_mean_anomaly(
+        data['a'], data['ecc'], data['inc'],
+        data['omega'], data['Omega'])
     M_phase = M_initial.copy()
 
     # Pre-compute planet 3D orbit points (fixed; camera transform applied per frame)
@@ -616,21 +667,28 @@ def main():
             cam_y_span    = cam_x_span * HEIGHT / WIDTH   # recompute after override
 
         # --- Compute positions ---
-        # Moving asteroids: real 3D orbital positions from their catalogue phase.
-        # Waiting asteroids: a/i plane — x=a, y=0, z=inclination (scaled).
+        # Orbital positions from current phase.
         M_current = M_phase % TWO_PI
-        x, y, z = compute_positions(data['a'], data['ecc'], data['inc'],
-                                    data['omega'], data['Omega'], M_current)
+        x_orb, y_orb, z_orb = compute_positions(
+            data['a'], data['ecc'], data['inc'],
+            data['omega'], data['Omega'], M_current)
 
-        # Waiting asteroids: a/i distribution display (I=toggle) or real frozen positions.
-        # z = a·sin(i) is the physical max orbital height in AU — same units as the
-        # real orbit view, so the scale matches when toggling with I.
-        waiting_mask = ~moving_mask
         if show_ai_plane:
-            x = np.where(waiting_mask, data['a'], x)
-            y = np.where(waiting_mask, 0.0, y)
-            z = np.where(waiting_mask, data['a'] * np.sin(data['inc']), z)
-        # else: keep real orbital positions frozen at the catalogue phase
+            # a/i plane positions (waiting state)
+            x_ai = data['a']
+            y_ai = np.float64(0.0)
+            z_ai = data['a'] * np.sin(data['inc'])
+
+            # Smooth transition: blend from a/i plane → orbital position
+            alpha = np.clip((sim_time - data['M0']) / TRANSITION_DEGREES, 0.0, 1.0)
+            alpha = alpha * alpha * (3.0 - 2.0 * alpha)   # smoothstep
+
+            x = x_ai + alpha * (x_orb - x_ai)
+            y = y_ai + alpha * (y_orb - y_ai)
+            z = z_ai + alpha * (z_orb - z_ai)
+        else:
+            # No a/i plane: use orbital positions directly
+            x, y, z = x_orb, y_orb, z_orb
 
         # --- Camera rotation ---
         # 1. Azimuth: rotate around vertical (z) axis
